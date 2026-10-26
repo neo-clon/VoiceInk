@@ -1,0 +1,69 @@
+name: Build VoiceInk Local
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout VoiceInk
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Selecting Xcode: $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Build whisper.xcframework (macOS only for fast build)
+        run: |
+          DEPS_DIR="$HOME/VoiceInk-Dependencies"
+          WHISPER_CPP_DIR="$DEPS_DIR/whisper.cpp"
+          mkdir -p "$DEPS_DIR"
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_CPP_DIR"
+          cd "$WHISPER_CPP_DIR"
+          python3 - << 'EOF'
+          with open("build-xcframework.sh", "r") as f:
+              content = f.read()
+          idx = content.index('echo "Building for iOS simulator..."')
+          macos_only = content[:idx] + '''
+          echo "Building for macOS..."
+          cmake -B build-macos -G Xcode \\
+              "${COMMON_CMAKE_ARGS[@]}" \\
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOS_MIN_OS_VERSION} \\
+              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \\
+              -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \\
+              -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \\
+              -DWHISPER_COREML="ON" \\
+              -DWHISPER_COREML_ALLOW_FALLBACK="ON" \\
+              -S .
+          cmake --build build-macos --config Release -- -quiet
+
+          setup_framework_structure "build-macos" ${MACOS_MIN_OS_VERSION} "macos"
+          combine_static_libraries "build-macos" "Release" "macos" "false"
+
+          xcodebuild -create-xcframework \\
+              -framework $(pwd)/build-macos/framework/whisper.framework \\
+              -debug-symbols $(pwd)/build-macos/dSYMs/whisper.dSYM \\
+              -output $(pwd)/build-apple/whisper.xcframework
+          '''
+          with open("build-xcframework.sh", "w") as f:
+              f.write(macos_only)
+          EOF
+          chmod +x build-xcframework.sh
+          ./build-xcframework.sh
+
+      - name: Build VoiceInk (make local)
+        run: |
+          make local LOCAL_CODESIGN_IDENTITY=-
+          ditto -c -k --sequesterRsrc --keepParent "$HOME/Downloads/VoiceInk.app" VoiceInk-Local.zip
+
+      - name: Upload VoiceInk.app Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceInk-app
+          path: VoiceInk-Local.zip
