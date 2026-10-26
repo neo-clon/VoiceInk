@@ -19,7 +19,15 @@ jobs:
           sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
           xcodebuild -version
 
+      - name: Cache whisper.xcframework
+        id: cache-whisper
+        uses: actions/cache@v4
+        with:
+          path: ~/VoiceInk-Dependencies/whisper.cpp/build-apple/whisper.xcframework
+          key: whisper-xcframework-macos-v1
+
       - name: Build whisper.xcframework (macOS only for fast build)
+        if: steps.cache-whisper.outputs.cache-hit != 'true'
         run: |
           DEPS_DIR="$HOME/VoiceInk-Dependencies"
           WHISPER_CPP_DIR="$DEPS_DIR/whisper.cpp"
@@ -59,6 +67,20 @@ jobs:
 
       - name: Build VoiceInk (make local)
         run: |
+          python3 - << 'EOF'
+          import json
+          p = "VoiceInk.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+          with open(p, "r") as f:
+              data = json.load(f)
+          for pin in data.get("pins", []):
+              if pin.get("identity") == "mlx-swift":
+                  pin["state"] = {
+                      "revision": "dc43e62d7055353c7f99fa071a4e71d29dfddc44",
+                      "version": "0.31.4"
+                  }
+          with open(p, "w") as f:
+              json.dump(data, f, indent=2)
+          EOF
           make local LOCAL_CODESIGN_IDENTITY=-
           ditto -c -k --sequesterRsrc --keepParent "$HOME/Downloads/VoiceInk.app" VoiceInk-Local.zip
 
