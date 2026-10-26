@@ -305,8 +305,6 @@ class VoiceInkEngine: NSObject, ObservableObject {
                                 return
                             }
 
-                            self.startRecordingContextCapture()
-
                             let modelResolution = ModeRuntimeResolver.transcriptionModelResolution(
                                 transcriptionModelManager: self.transcriptionModelManager
                             )
@@ -333,7 +331,11 @@ class VoiceInkEngine: NSObject, ObservableObject {
                                 return
                             }
 
-                            if self.serviceRegistry.shouldUseRealtimeTranscription(for: transcriptionConfiguration) {
+                            self.startRecordingContextCapture(language: transcriptionConfiguration.language)
+
+                            if self.serviceRegistry.shouldUseRealtimeTranscription(for: transcriptionConfiguration),
+                                let contextStore = self.activeRecordingContextStore
+                            {
                                 let session = self.serviceRegistry.createSession(
                                     for: transcriptionConfiguration,
                                     onPartialTranscript: { [weak self] partial in
@@ -351,7 +353,8 @@ class VoiceInkEngine: NSObject, ObservableObject {
                                 self.currentSession = session
                                 self.currentSessionTranscriptionConfiguration = transcriptionConfiguration
                                 let realCallback = try await session.prepare(
-                                    configuration: transcriptionConfiguration
+                                    configuration: transcriptionConfiguration,
+                                    vocabulary: contextStore.vocabularyPreparation.current
                                 )
 
                                 if let realCallback {
@@ -535,15 +538,21 @@ class VoiceInkEngine: NSObject, ObservableObject {
 
     // MARK: - Recording Context
 
-    private func startRecordingContextCapture() {
+    private func startRecordingContextCapture(language: String) {
         clearActiveRecordingContext()
 
-        let store = RecordingContextSnapshotStore()
+        let store = RecordingContextSnapshotStore(
+            savedVocabulary: CustomVocabularyService.shared.loadSavedVocabulary(from: modelContext)
+        )
         activeRecordingContextStore = store
-        activeRecordingContextTasks = RecordingContextCaptureService.startCapture(into: store)
+        activeRecordingContextTasks = RecordingContextCaptureService.startCapture(
+            into: store,
+            language: language
+        )
     }
 
     private func clearActiveRecordingContext() {
+        activeRecordingContextStore?.vocabularyPreparation.finish()
         activeRecordingContextTasks.forEach { $0.cancel() }
         activeRecordingContextTasks.removeAll()
         activeRecordingContextStore = nil
@@ -561,6 +570,7 @@ class VoiceInkEngine: NSObject, ObservableObject {
             let transcriptionConfiguration = currentSessionTranscriptionConfiguration
                 ?? ModeRuntimeResolver.transcriptionConfiguration(transcriptionModelManager: transcriptionModelManager)
         else {
+            contextStore?.vocabularyPreparation.finish()
             transcription.text = String(localized: "Transcription Failed: No model selected")
             transcription.transcriptionStatus = TranscriptionStatus.failed.rawValue
             try? modelContext.save()
@@ -572,6 +582,10 @@ class VoiceInkEngine: NSObject, ObservableObject {
         let session = currentSession
         let transcriptionID = transcription.id
         activePipelineTranscriptionID = transcriptionID
+
+        let vocabularyPreparation = contextStore?.vocabularyPreparation ?? RecordingVocabularyPreparation(
+            savedVocabulary: CustomVocabularyService.shared.loadSavedVocabulary(from: modelContext)
+        )
 
         await pipeline.run(
             transcription: transcription,
@@ -596,6 +610,7 @@ class VoiceInkEngine: NSObject, ObservableObject {
                     aiService: aiService
                 )
             },
+            vocabularyPreparation: vocabularyPreparation,
             recordingContextSnapshot: {
                 await MainActor.run {
                     contextStore?.snapshot
